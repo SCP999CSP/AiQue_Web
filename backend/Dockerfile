@@ -20,7 +20,9 @@ RUN uv venv && uv sync --frozen --no-dev --no-install-project
 COPY . .
 
 # 把 venv 放进 PATH —— 运行时直接用 alembic / uvicorn，不再走 uv run（避免每次冷启动重装环境）
-ENV PATH="/app/.venv/bin:$PATH"
+# PYTHONPATH=/app 让 alembic env.py / uvicorn 能 import app.*（不走 uv run 就没有隐式 sys.path 注入）
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONPATH="/app"
 
 # 暴露端口（Cloud Run 注入 $PORT，默认 8080）
 EXPOSE 8080
