@@ -4,7 +4,11 @@
 .env
 .env.local
 .env.*.local
+.env.production
+.env.*.production
 !.env.example
+# 前端生产构建变量（仅公开值 VITE_*，需被 Cloud Build checkout）
+!clerk-react/.env.production
 
 # ============================================
 # Python

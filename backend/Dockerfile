@@ -14,8 +14,8 @@ RUN uv venv && uv sync --frozen --no-dev --no-install-project
 # 复制应用代码
 COPY . .
 
-# 暴露端口
-EXPOSE 8000
+# 暴露端口（Cloud Run 注入 $PORT，默认 8080）
+EXPOSE 8080
 
-# 运行应用
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 启动：先跑数据库迁移（幂等），再起服务，监听 $PORT
+CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]

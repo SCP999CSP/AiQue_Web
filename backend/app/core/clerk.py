@@ -1,3 +1,4 @@
+import os
 from typing import Annotated
 from fastapi import Depends, HTTPException, Request
 from clerk_backend_api import Clerk, AuthenticateRequestOptions
@@ -5,6 +6,18 @@ from sqlmodel import SQLModel
 from app.core.config import settings
 
 clerk_sdk = Clerk(settings.CLERK_SECRET_KEY)
+
+# Clerk 允许的来源（token 的 azp 声明须匹配）。
+# 逗号分隔，默认本地开发端口；线上用环境变量 CLERK_AUTHORIZED_PARTIES 覆盖成前端域名。
+_DEFAULT_AUTHORIZED_PARTIES = (
+    "http://localhost:5173,http://127.0.0.1:5173,"
+    "http://localhost:5174,http://127.0.0.1:5174"
+)
+AUTHORIZED_PARTIES = [
+    p.strip()
+    for p in os.getenv("CLERK_AUTHORIZED_PARTIES", _DEFAULT_AUTHORIZED_PARTIES).split(",")
+    if p.strip()
+]
 
 
 class CurrentUser(SQLModel):
@@ -25,12 +38,7 @@ def authenticate_and_get_user_details(request: Request) -> CurrentUser:
         request_status = clerk_sdk.authenticate_request(
             request,
             AuthenticateRequestOptions(
-                authorized_parties=[
-                    "http://localhost:5173",  # Vite 默认端口
-                    "http://127.0.0.1:5173",
-                    "http://localhost:5174",  # 保留其他端口支持
-                    "http://127.0.0.1:5174",  
-                ],
+                authorized_parties=AUTHORIZED_PARTIES,
                 jwt_key=settings.JWKS_PUBLIC_KEY,
             ),
         )

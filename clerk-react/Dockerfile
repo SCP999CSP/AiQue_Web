@@ -1,5 +1,5 @@
 # 构建阶段
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -12,14 +12,8 @@ COPY package.json pnpm-lock.yaml ./
 # 安装依赖
 RUN pnpm install --frozen-lockfile
 
-# 复制源代码
+# 复制源代码（含 .env.production —— Vite 构建时自动读取 VITE_* 变量）
 COPY . .
-
-# 构建应用（环境变量在构建时注入）
-ARG VITE_API_URL
-ARG VITE_CLERK_PUBLISHABLE_KEY
-ENV VITE_API_URL=$VITE_API_URL
-ENV VITE_CLERK_PUBLISHABLE_KEY=$VITE_CLERK_PUBLISHABLE_KEY
 
 RUN pnpm run build
 
@@ -29,10 +23,10 @@ FROM nginx:alpine
 # 复制构建产物到 nginx
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# 复制 nginx 配置（用于 SPA 路由支持）
+# 复制 nginx 配置（用于 SPA 路由支持；监听 $PORT=8080）
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-EXPOSE 80
+EXPOSE 8080
 
 CMD ["nginx", "-g", "daemon off;"]
 
