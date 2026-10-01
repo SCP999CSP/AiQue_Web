@@ -1,0 +1,398 @@
+# Staging：GitHub Actions 构建镜像 → Artifact Registry → Cloud Run
+#
+# 配置全部放在 GitHub Environment「staging」。
+#
+# secrets:
+#   POSTGRES_PASSWORD
+#   SECRET_KEY
+#   OPENAI_API_KEY
+#   CLERK_SECRET_KEY
+#   JWKS_PUBLIC_KEY
+#
+# variables:
+#   WIF_PROVIDER
+#   WIF_SERVICE_ACCOUNT
+#   GCP_PROJECT_ID
+#   GCP_REGION
+#   AR_REPO
+#   BACKEND_SERVICE
+#   FRONTEND_SERVICE
+#   PROJECT_NAME
+#   API_V1_STR
+#   POSTGRES_SERVER
+#   POSTGRES_PORT
+#   POSTGRES_USER
+#   POSTGRES_DB
+#   POSTGRES_SSLMODE
+#   DB_ECHO
+#   DB_POOL_SIZE
+#   DB_MAX_OVERFLOW
+#
+# 前端 VITE_CLERK_PUBLISHABLE_KEY 来自已跟踪的 clerk-react/.env.production。
+# VITE_API_URL 在构建前改写成当前 Cloud Run 后端地址，不使用文件里的旧 URL。
+
+name: Deploy Staging
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "clerk-react/**"
+      - ".github/workflows/deploy-staging.yml"
+  workflow_dispatch:
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed components
+        id: filter
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          before="${{ github.event.before }}"
+          if [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            files=$(git ls-tree -r --name-only HEAD)
+          else
+            files=$(git diff --name-only "$before" "${{ github.sha }}")
+          fi
+          backend=false
+          frontend=false
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            case "$path" in
+              backend/*|.github/workflows/deploy-staging.yml) backend=true ;;
+            esac
+            case "$path" in
+              clerk-react/*|.github/workflows/deploy-staging.yml) frontend=true ;;
+            esac
+          done <<< "$files"
+          echo "backend=$backend" >> "$GITHUB_OUTPUT"
+          echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
+
+  backend:
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      url: ${{ steps.url.outputs.url }}
+    env:
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      AR_REPO: ${{ vars.AR_REPO }}
+      SERVICE: ${{ vars.BACKEND_SERVICE }}
+      REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check staging configuration
+        env:
+          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+          WIF_SERVICE_ACCOUNT: ${{ vars.WIF_SERVICE_ACCOUNT }}
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          API_V1_STR: ${{ vars.API_V1_STR }}
+          POSTGRES_SERVER: ${{ vars.POSTGRES_SERVER }}
+          POSTGRES_PORT: ${{ vars.POSTGRES_PORT }}
+          POSTGRES_USER: ${{ vars.POSTGRES_USER }}
+          POSTGRES_DB: ${{ vars.POSTGRES_DB }}
+          POSTGRES_SSLMODE: ${{ vars.POSTGRES_SSLMODE }}
+          DB_ECHO: ${{ vars.DB_ECHO }}
+          DB_POOL_SIZE: ${{ vars.DB_POOL_SIZE }}
+          DB_MAX_OVERFLOW: ${{ vars.DB_MAX_OVERFLOW }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+          JWKS_PUBLIC_KEY: ${{ secrets.JWKS_PUBLIC_KEY }}
+        run: |
+          missing=()
+          for name in \
+            PROJECT_ID REGION AR_REPO SERVICE \
+            WIF_PROVIDER WIF_SERVICE_ACCOUNT \
+            PROJECT_NAME API_V1_STR \
+            POSTGRES_SERVER POSTGRES_PORT POSTGRES_USER POSTGRES_DB POSTGRES_SSLMODE \
+            DB_ECHO DB_POOL_SIZE DB_MAX_OVERFLOW \
+            POSTGRES_PASSWORD SECRET_KEY OPENAI_API_KEY CLERK_SECRET_KEY JWKS_PUBLIC_KEY
+          do
+            if [ -z "${!name}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "missing staging settings: ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Ensure Artifact Registry repository
+        run: |
+          if ! gcloud artifacts repositories describe "${{ env.AR_REPO }}" \
+            --location="${{ env.REGION }}" >/dev/null 2>&1; then
+            gcloud artifacts repositories create "${{ env.AR_REPO }}" \
+              --repository-format=docker \
+              --location="${{ env.REGION }}" \
+              --description="AiQue container images"
+          fi
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${{ env.REGISTRY }}" --quiet
+
+      - name: Build and push image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/backend"
+          docker build \
+            -t "${IMAGE}:${{ github.sha }}" \
+            -t "${IMAGE}:latest" \
+            backend
+          docker push "${IMAGE}:${{ github.sha }}"
+          docker push "${IMAGE}:latest"
+
+      - name: Write Cloud Run env file
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          API_V1_STR: ${{ vars.API_V1_STR }}
+          POSTGRES_SERVER: ${{ vars.POSTGRES_SERVER }}
+          POSTGRES_PORT: ${{ vars.POSTGRES_PORT }}
+          POSTGRES_USER: ${{ vars.POSTGRES_USER }}
+          POSTGRES_DB: ${{ vars.POSTGRES_DB }}
+          POSTGRES_SSLMODE: ${{ vars.POSTGRES_SSLMODE }}
+          DB_ECHO: ${{ vars.DB_ECHO }}
+          DB_POOL_SIZE: ${{ vars.DB_POOL_SIZE }}
+          DB_MAX_OVERFLOW: ${{ vars.DB_MAX_OVERFLOW }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+          JWKS_PUBLIC_KEY: ${{ secrets.JWKS_PUBLIC_KEY }}
+        run: |
+          python3 << 'PY'
+          import os
+          from pathlib import Path
+
+          keys = (
+              "PROJECT_NAME",
+              "API_V1_STR",
+              "POSTGRES_SERVER",
+              "POSTGRES_PORT",
+              "POSTGRES_USER",
+              "POSTGRES_DB",
+              "POSTGRES_SSLMODE",
+              "POSTGRES_PASSWORD",
+              "SECRET_KEY",
+              "OPENAI_API_KEY",
+              "CLERK_SECRET_KEY",
+              "JWKS_PUBLIC_KEY",
+              "DB_ECHO",
+              "DB_POOL_SIZE",
+              "DB_MAX_OVERFLOW",
+          )
+          values = {key: os.environ[key] for key in keys}
+
+          def dump(value: str) -> str:
+              escaped = (
+                  value.replace("\\", "\\\\")
+                  .replace('"', '\\"')
+                  .replace("\n", "\\n")
+                  .replace("\r", "\\r")
+              )
+              return f'"{escaped}"'
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "cloud-run-env.yaml"
+          path.write_text("".join(f"{key}: {dump(value)}\n" for key, value in values.items()))
+          print(f"wrote {path} ({len(values)} keys)")
+          PY
+
+      - name: Deploy to Cloud Run
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/backend:${{ github.sha }}"
+          args=(
+            --project="${{ env.PROJECT_ID }}"
+            --region="${{ env.REGION }}"
+            --image="${IMAGE}"
+            --platform=managed
+            --port=8080
+            --memory=1Gi
+            --cpu=1
+            --timeout=300
+            --concurrency=40
+            --min-instances=0
+            --max-instances=2
+            --env-vars-file="${RUNNER_TEMP}/cloud-run-env.yaml"
+            --quiet
+          )
+          if ! gcloud run services describe "${{ env.SERVICE }}" \
+            --project="${{ env.PROJECT_ID }}" \
+            --region="${{ env.REGION }}" >/dev/null 2>&1; then
+            args+=(--allow-unauthenticated)
+          fi
+          gcloud run deploy "${{ env.SERVICE }}" "${args[@]}"
+
+      - name: Print service URL
+        id: url
+        run: |
+          url=$(gcloud run services describe "${{ env.SERVICE }}" \
+            --project="${{ env.PROJECT_ID }}" \
+            --region="${{ env.REGION }}" \
+            --format='value(status.url)')
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          echo "${url}"
+
+  frontend:
+    needs: [changes, backend]
+    if: |
+      always() &&
+      needs.changes.result == 'success' &&
+      (needs.backend.result == 'success' || needs.backend.result == 'skipped') &&
+      (github.event_name == 'workflow_dispatch' || needs.changes.outputs.frontend == 'true')
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      AR_REPO: ${{ vars.AR_REPO }}
+      SERVICE: ${{ vars.FRONTEND_SERVICE }}
+      BACKEND_SERVICE: ${{ vars.BACKEND_SERVICE }}
+      REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check staging configuration
+        env:
+          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+          WIF_SERVICE_ACCOUNT: ${{ vars.WIF_SERVICE_ACCOUNT }}
+        run: |
+          missing=()
+          for name in PROJECT_ID REGION AR_REPO SERVICE BACKEND_SERVICE WIF_PROVIDER WIF_SERVICE_ACCOUNT; do
+            if [ -z "${!name}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "missing staging settings: ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Ensure Artifact Registry repository
+        run: |
+          if ! gcloud artifacts repositories describe "${{ env.AR_REPO }}" \
+            --location="${{ env.REGION }}" >/dev/null 2>&1; then
+            gcloud artifacts repositories create "${{ env.AR_REPO }}" \
+              --repository-format=docker \
+              --location="${{ env.REGION }}" \
+              --description="AiQue container images"
+          fi
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${{ env.REGISTRY }}" --quiet
+
+      - name: Point frontend build at the staging backend
+        env:
+          BACKEND_URL_FROM_JOB: ${{ needs.backend.outputs.url }}
+        run: |
+          if [ -n "${BACKEND_URL_FROM_JOB}" ]; then
+            api_url="${BACKEND_URL_FROM_JOB}"
+          else
+            api_url=$(gcloud run services describe "${{ env.BACKEND_SERVICE }}" \
+              --project="${{ env.PROJECT_ID }}" \
+              --region="${{ env.REGION }}" \
+              --format='value(status.url)')
+          fi
+          if [ -z "${api_url}" ]; then
+            echo "backend service ${{ env.BACKEND_SERVICE }} has no URL" >&2
+            exit 1
+          fi
+          python3 - "${api_url}" << 'PY'
+          import sys
+          from pathlib import Path
+
+          api_url = sys.argv[1]
+          path = Path("clerk-react/.env.production")
+          key = ""
+          if path.exists():
+              for line in path.read_text().splitlines():
+                  if line.startswith("VITE_CLERK_PUBLISHABLE_KEY="):
+                      key = line.split("=", 1)[1].strip().strip('"')
+                      break
+          if not key:
+              raise SystemExit("missing VITE_CLERK_PUBLISHABLE_KEY in clerk-react/.env.production")
+          path.write_text(
+              f"VITE_CLERK_PUBLISHABLE_KEY={key}\nVITE_API_URL={api_url}\n"
+          )
+          print(f"frontend build API URL: {api_url}")
+          PY
+
+      - name: Build and push image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend"
+          docker build \
+            -t "${IMAGE}:${{ github.sha }}" \
+            -t "${IMAGE}:latest" \
+            clerk-react
+          docker push "${IMAGE}:${{ github.sha }}"
+          docker push "${IMAGE}:latest"
+
+      - name: Deploy to Cloud Run
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:${{ github.sha }}"
+          args=(
+            --project="${{ env.PROJECT_ID }}"
+            --region="${{ env.REGION }}"
+            --image="${IMAGE}"
+            --platform=managed
+            --port=8080
+            --memory=512Mi
+            --cpu=1
+            --timeout=60
+            --concurrency=80
+            --min-instances=0
+            --max-instances=2
+            --quiet
+          )
+          if ! gcloud run services describe "${{ env.SERVICE }}" \
+            --project="${{ env.PROJECT_ID }}" \
+            --region="${{ env.REGION }}" >/dev/null 2>&1; then
+            args+=(--allow-unauthenticated)
+          fi
+          gcloud run deploy "${{ env.SERVICE }}" "${args[@]}"
+
+      - name: Print service URL
+        run: |
+          gcloud run services describe "${{ env.SERVICE }}" \
+            --project="${{ env.PROJECT_ID }}" \
+            --region="${{ env.REGION }}" \
+            --format='value(status.url)'
