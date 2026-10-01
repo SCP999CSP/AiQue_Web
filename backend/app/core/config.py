@@ -37,10 +37,18 @@ class Settings(BaseSettings):
     POSTGRES_USER: str = "postgres"
     POSTGRES_PASSWORD: str = "postgres"
     POSTGRES_DB: str = "questions_db"
+    # Neon 要求 sslmode=require；本地 Postgres 留空
+    POSTGRES_SSLMODE: str = ""
+
+    # Cloud Run 多实例时把池子压小，避免打满 Neon 连接数
+    DB_ECHO: bool = True
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
 
     @computed_field
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> PostgresDsn:
+        query = f"sslmode={self.POSTGRES_SSLMODE}" if self.POSTGRES_SSLMODE else None
         return PostgresDsn.build(
             scheme="postgresql+psycopg",
             username=self.POSTGRES_USER,
@@ -48,6 +56,7 @@ class Settings(BaseSettings):
             host=self.POSTGRES_SERVER,
             port=self.POSTGRES_PORT,
             path=self.POSTGRES_DB,
+            query=query,
         )
 
 

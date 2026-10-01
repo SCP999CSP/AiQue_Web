@@ -14,7 +14,10 @@ from sqlmodel import SQLModel
 config = context.config
 
 # 设置数据库 URL
-config.set_main_option("sqlalchemy.url", str(settings.SQLALCHEMY_DATABASE_URI))
+# ConfigParser 把 % 当插值；密码里的 % 要写成 %%
+config.set_main_option(
+    "sqlalchemy.url", str(settings.SQLALCHEMY_DATABASE_URI).replace("%", "%%")
+)
 
 # 如果配置了日志，则使用它
 if config.config_file_name is not None:
