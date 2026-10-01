@@ -7,7 +7,7 @@ export const Route = createFileRoute('/')({
 function Index() {
   return (
     <div className="space-y-4">
-      <h1 className="text-4xl font-bold">欢迎使用20261001</h1>
+      <h1 className="text-4xl font-bold">欢迎使用20261001-1</h1>
       <p className="text-muted-foreground">
         这是一个集成了以下工具的 React 应用：
       </p>
